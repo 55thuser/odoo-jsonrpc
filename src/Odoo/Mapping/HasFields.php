@@ -4,6 +4,7 @@
 namespace Obuchmann\OdooJsonRpc\Odoo\Mapping;
 
 
+use Obuchmann\OdooJsonRpc\Attributes\BelongsTo;
 use Obuchmann\OdooJsonRpc\Attributes\Field;
 use Obuchmann\OdooJsonRpc\Attributes\HasMany;
 use Obuchmann\OdooJsonRpc\Attributes\Key;
@@ -22,10 +23,22 @@ trait HasFields
         $properties = $reflectionClass->getProperties();
 
         foreach ($properties as $property) {
+            // Field attributes
             $attributes = $property->getAttributes(Field::class);
-
             foreach ($attributes as $attribute) {
                 $fieldNames[] = $attribute->newInstance()->name ?? $property->name;
+            }
+            
+            // HasMany relationships
+            $hasManyAttributes = $property->getAttributes(HasMany::class);
+            foreach ($hasManyAttributes as $attribute) {
+                $fieldNames[] = $attribute->newInstance()->name;
+            }
+            
+            // BelongsTo relationships
+            $belongsToAttributes = $property->getAttributes(BelongsTo::class);
+            foreach ($belongsToAttributes as $attribute) {
+                $fieldNames[] = $attribute->newInstance()->name;
             }
         }
         return $fieldNames;
@@ -44,8 +57,9 @@ trait HasFields
         foreach ($properties as $property) {
             $isKey = !empty($property->getAttributes(Key::class));
             $isKeyName = !empty($property->getAttributes(KeyName::class));
+            
+            // Handle Field attributes
             $attributes = $property->getAttributes(Field::class);
-
             foreach ($attributes as $attribute) {
                 $field = $attribute->newInstance()->name ?? $property->name;
                 if (isset($response->{$field})) {
@@ -58,7 +72,49 @@ trait HasFields
                     }
                     $instance->{$property->name} = $castsExists ? CastHandler::cast($property, $value) : $value;
                 }
-
+            }
+            
+            // Handle HasMany relationships
+            $hasManyAttributes = $property->getAttributes(HasMany::class);
+            foreach ($hasManyAttributes as $attribute) {
+                $hasManyInstance = $attribute->newInstance();
+                $field = $hasManyInstance->name;
+                if (isset($response->{$field})) {
+                    $relatedIds = $response->{$field};
+                    if (is_array($relatedIds) && !empty($relatedIds)) {
+                        // Hydrate the related models
+                        $relatedClass = $hasManyInstance->class;
+                        $relatedModels = $relatedClass::read($relatedIds);
+                        $instance->{$property->name} = $relatedModels;
+                    } else {
+                        $instance->{$property->name} = [];
+                    }
+                } else {
+                    $instance->{$property->name} = [];
+                }
+            }
+            
+            // Handle BelongsTo relationships
+            $belongsToAttributes = $property->getAttributes(BelongsTo::class);
+            foreach ($belongsToAttributes as $attribute) {
+                $belongsToInstance = $attribute->newInstance();
+                $field = $belongsToInstance->name;
+                if (isset($response->{$field})) {
+                    $relatedData = $response->{$field};
+                    if ($relatedData !== false && $relatedData !== null) {
+                        // Odoo returns [id, name] for many2one fields
+                        $relatedId = is_array($relatedData) ? ($relatedData[0] ?? null) : $relatedData;
+                        if ($relatedId !== null) {
+                            $relatedClass = $belongsToInstance->class;
+                            $relatedModel = $relatedClass::find($relatedId);
+                            $instance->{$property->name} = $relatedModel;
+                        } else {
+                            $instance->{$property->name} = null;
+                        }
+                    } else {
+                        $instance->{$property->name} = null;
+                    }
+                }
             }
         }
 
@@ -83,6 +139,7 @@ trait HasFields
                 }
             }
 
+            // Handle HasMany relationships
             $hasManyRelations = $property->getAttributes(HasMany::class);
             foreach ($hasManyRelations as $attribute) {
                 $field = $attribute->newInstance()->name ?? $property->name;
@@ -108,6 +165,22 @@ trait HasFields
                         $item->{$field} = $commands;
                     }
 
+                }
+            }
+            
+            // Handle BelongsTo relationships
+            $belongsToRelations = $property->getAttributes(BelongsTo::class);
+            foreach ($belongsToRelations as $attribute) {
+                $field = $attribute->newInstance()->name ?? $property->name;
+                if ($property->isInitialized($model)) {
+                    $value = $model->{$property->name};
+                    if ($value instanceof OdooModel && $value->exists()) {
+                        $item->{$field} = $value->id;
+                    } elseif (is_int($value)) {
+                        $item->{$field} = $value;
+                    } elseif ($value === null) {
+                        $item->{$field} = false; // Odoo expects false for empty many2one
+                    }
                 }
             }
 
